@@ -8,6 +8,12 @@ import "@0x/contracts-utils/contracts/src/LibBytes.sol";
 import "openzeppelin-solidity/contracts/math/SafeMath.sol";
 
 contract RelayHub is IRelayHub {
+    enum PreconditionCheck {
+        OK,                         // All precondition checks passed, the call can be relayed
+        WrongSignature,             // The sender did not sign all relayCall arguments
+        WrongNonce,                 // The provided nonce has already been used by the sender
+        AcceptRelayedCallReverted   // The recipient rejected this call via acceptRelayedCall
+    }
 
     // Anyone can call certain functions in this singleton and trigger relay processes.
 
@@ -29,6 +35,8 @@ contract RelayHub is IRelayHub {
     mapping(address => uint256) public nonces;    // Nonces of senders, since their ether address nonce may never change.
 
     enum State {UNKNOWN, STAKED, REGISTERED, REMOVED, PENALIZED}
+
+    enum AtomicRecipientCallsStatus {OK, CanRelayFailed, RelayedCallFailed, PreRelayedFailed, PostRelayedFailed}
 
     struct Relay {
         uint256 stake;             // Size of the stake
