@@ -8,13 +8,6 @@ import "@0x/contracts-utils/contracts/src/LibBytes.sol";
 import "openzeppelin-solidity/contracts/math/SafeMath.sol";
 
 contract RelayHub is IRelayHub {
-    enum PreconditionCheck {
-        OK,                         // All precondition checks passed, the call can be relayed
-        WrongSignature,             // The sender did not sign all relayCall arguments
-        WrongNonce,                 // The provided nonce has already been used by the sender
-        AcceptRelayedCallReverted   // The recipient rejected this call via acceptRelayedCall
-    }
-
     // Anyone can call certain functions in this singleton and trigger relay processes.
 
     uint256 constant public minimumStake = 0.1 ether;
@@ -337,17 +330,21 @@ contract RelayHub is IRelayHub {
         // If either pre or post reverts, the whole internal transaction will be reverted, reverting all side effects on
         // the recipient. The recipient will still be charged for the used gas by the relay.
 
+        // The recipient is no allowed to withdraw balance from RelayHub during a relayed transaction. We check pre and
+        // post state to ensure this doesn't happen.
+        uint256 balanceBefore = balances[recipient];
+
         // First preRelayedCall is executed.
         // It is the recipient's responsability to ensure, in acceptRelayedCall, that this call will not revert.
         bytes32 preReturnValue;
         {
             // Note: we open a new block to avoid growing the stack too much.
-            bytes memory transaction = abi.encodeWithSelector(
+            bytes memory data = abi.encodeWithSelector(
                 IRelayRecipient(recipient).preRelayedCall.selector,
                 relayAddr, from, encodedFunction, transactionFee
             );
 
-            (bool success, bytes memory retData) = recipient.call.gas(preRelayedCallMaxGas)(transaction);
+            (bool success, bytes memory retData) = recipient.call.gas(preRelayedCallMaxGas)(data);
 
             if (!success) {
                 revertWithStatus(RelayCallStatus.PreRelayedFailed);
@@ -355,10 +352,6 @@ contract RelayHub is IRelayHub {
 
             preReturnValue = abi.decode(retData, (bytes32));
         }
-
-        // The recipient is no allowed to withdraw balance from RelayHub during a relayed transaction. We check pre and
-        // post state to ensure this doesn't happen.
-        uint256 balanceBefore = balances[recipient];
 
         // The actual relayed call is now executed. The sender's address is appended at the end of the transaction data
         (bool relayedCallSuccess,) = recipient.call.gas(gasLimit)(abi.encodePacked(encodedFunction, from));
@@ -369,12 +362,12 @@ contract RelayHub is IRelayHub {
 
         // Finally, postRelayedCall is executed, with the relayedCall execution's status.
         {
-            bytes memory transaction = abi.encodeWithSelector(
+            bytes memory data = abi.encodeWithSelector(
                 IRelayRecipient(recipient).postRelayedCall.selector,
                 relayAddr, from, encodedFunction, relayedCallSuccess, gasUsed, transactionFee, preReturnValue
             );
 
-            (bool successPost,) = recipient.call.gas(postRelayedCallMaxGas)(transaction);
+            (bool successPost,) = recipient.call.gas(postRelayedCallMaxGas)(data);
 
             if (!successPost) {
                 revertWithStatus(RelayCallStatus.PostRelayedFailed);
@@ -382,7 +375,7 @@ contract RelayHub is IRelayHub {
         }
 
         if (balances[recipient] < balanceBefore) {
-            revertWithStatus(RelayCallStatus.PostRelayedFailed);
+            revertWithStatus(RelayCallStatus.RecipientBalanceChanged);
         }
 
         return relayedCallSuccess ? RelayCallStatus.OK : RelayCallStatus.RelayedCallFailed;
