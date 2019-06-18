@@ -727,9 +727,9 @@ contract("RelayHub", function (accounts) {
                 gasLimit: gas_limit_any_value
             });
             relay_nonce++;
-            let PostRelayedFailed = 4;
+            let RecipientBalanceChanged = 5;
             assert.equal("TransactionRelayed", res.logs[0].event);
-            assert.equal(PostRelayedFailed, res.logs[0].args.status);
+            assert.equal(RecipientBalanceChanged, res.logs[0].args.status);
         } finally {
             // returning state to previous one
             await sr.setWithdrawDuringRelayedCall(false);
