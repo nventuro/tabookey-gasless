@@ -20,7 +20,8 @@ contract RelayHub is IRelayHub {
     * the total gas overhead of relayCall(), before the first gasleft() and after the last gasleft().
     * Assume that relay has non-zero balance (costs 15'000 more otherwise).
     */
-    uint256 constant public gasOverhead = 47422;
+    uint256 constant public relayCallConstantCost = 47422;
+    uint256 constant public atomicCallsConstantCost = 0;
     uint256 constant public acceptRelayedCallMaxGas = 50000;
     uint256 constant public postRelayedCallMaxGas = 100000;
     uint256 constant public preRelayedCallMaxGas = 100000;
@@ -294,11 +295,13 @@ contract RelayHub is IRelayHub {
         // Calls to the recipient are performed atomically inside an inner transaction which may revert in case of
         // errors in the recipient. In either case (revert or regular execution) the return data encodes the
         // RelayCallStatus value.
-        (, bytes memory relayCallStatus) = address(this).call(abi.encodeWithSelector(this.recipientCallsAtomic.selector, from, recipient, msg.sender, encodedFunction, transactionFee, gasLimit, initialGas));
+        uint256 validationsGas = initialGas - gasleft();
+        (, bytes memory relayCallStatus) = address(this).call(abi.encodeWithSelector(this.recipientCallsAtomic.selector, from, recipient, msg.sender, encodedFunction, transactionFee, gasLimit, validationsGas));
+
         RelayCallStatus status = abi.decode(relayCallStatus, (RelayCallStatus));
 
         // Regardless of the outcome of the relayed transaction, the recipient is now charged.
-        uint256 charge = getChargedAmount(gasOverhead + initialGas - gasleft(), gasPrice, transactionFee);
+        uint256 charge = getChargedAmount(initialGas - gasleft() + relayCallConstantCost, gasPrice, transactionFee);
 
         // We've already checked that the recipient has enough balance to pay for the relayed transaction, this is only
         // a sanity check to prevent overflows in case of bugs.msg.sender
@@ -323,11 +326,12 @@ contract RelayHub is IRelayHub {
         bytes calldata encodedFunction,
         uint256 transactionFee,
         uint256 gasLimit,
-        uint256 initialGas
+        uint256 validationsGas
     )
         external
         returns (RelayCallStatus)
     {
+        uint256 atomicInitialGas = gasleft();
         // This external function can only be called by RelayHub itself, creating an internal transaction. Calls to the
         // recipient (preRelayedCall, the relayedCall, and postRelayedCall) are called from inside this transaction.
         require(msg.sender == address(this), "Only RelayHub should call this function");
@@ -359,18 +363,20 @@ contract RelayHub is IRelayHub {
         }
 
         // The actual relayed call is now executed. The sender's address is appended at the end of the transaction data
-        (bool relayedCallSuccess,) = recipient.call.gas(gasLimit)(abi.encodePacked(encodedFunction, from));
+        bool relayedCallSuccess;
+        {
+            bytes memory data = abi.encodePacked(encodedFunction, from);
+            (relayedCallSuccess,) = recipient.call.gas(gasLimit)(data);
+        }
 
         // Even if the relayed call fails, execution continues
 
-        uint256 gasUsed = gasOverhead + initialGas - gasleft();
-
         // Finally, postRelayedCall is executed, with the relayedCall execution's status.
         {
-            bytes memory data = abi.encodeWithSelector(
-                IRelayRecipient(recipient).postRelayedCall.selector,
-                relayAddr, from, encodedFunction, relayedCallSuccess, gasUsed, transactionFee, preReturnValue
-            );
+            uint256 chargeEstimate = (atomicInitialGas - gasleft()) + validationsGas + atomicCallsConstantCost + relayCallConstantCost;
+
+            bytes memory data_ = abi.encode(relayAddr, from, encodedFunction, relayedCallSuccess, chargeEstimate, transactionFee, preReturnValue);
+            bytes memory data = abi.encodePacked(IRelayRecipient(recipient).postRelayedCall.selector, data_);
 
             (bool successPost,) = recipient.call.gas(postRelayedCallMaxGas)(data);
 

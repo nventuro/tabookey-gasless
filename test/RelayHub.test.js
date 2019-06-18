@@ -60,10 +60,18 @@ contract('RelayHub', function ([_, relayOwner, relay, sender, other]) {
         beforeEach(async function () {
           // truffle-contract doesn't let us create method data from the class, we need an actual instance
           txData = recipient.contract.methods.emitMessage(message).encodeABI();
-
-          txHash = await getTransactionHash(sender, recipient.address, txData, fee, gasPrice, gasLimit, senderNonce, relayHub.address, relay);
-          signature = await getTransactionSignature(web3, sender, txHash);
         });
+
+        async function getRelayTxData(overrides = {}) {
+          let cfg = Object.assign({
+            sender, recipient, txData, fee, gasPrice, gasLimit, senderNonce, relayHub, relay
+          }, overrides);
+
+          const txHash = await getTransactionHash(cfg.sender, cfg.recipient.address, cfg.txData, cfg.fee, cfg.gasPrice, cfg.gasLimit, cfg.senderNonce, cfg.relayHub.address, cfg.relay);
+          const signature = await getTransactionSignature(web3, cfg.sender, txHash);
+
+          return { txHash, signature };
+        }
 
         context('with funded recipient', async function () {
           beforeEach(async function () {
@@ -71,6 +79,8 @@ contract('RelayHub', function ([_, relayOwner, relay, sender, other]) {
           });
 
           it('relaying is aborted if the recipient returns an invalid status code', async function () {
+            ({ txHash, signature } = await getRelayTxData());
+
             await recipient.setReturnInvalidErrorCode(true);
             const { logs } = await relayHub.relayCall(sender, recipient.address, txData, fee, gasPrice, gasLimit, senderNonce, signature, { from: relay, gasPrice, gasLimit });
 
@@ -80,7 +90,31 @@ contract('RelayHub', function ([_, relayOwner, relay, sender, other]) {
             });
           });
 
+          it('relays', async function () {
+            ({ txHash, signature } = await getRelayTxData());
+
+            const { receipt, logs } = await relayHub.relayCall(sender, recipient.address, txData, fee, gasPrice, gasLimit, senderNonce, signature, { from: relay, gasPrice, gasLimit });
+
+            expectEvent.inLogs(logs, 'TransactionRelayed', {
+              status: RelayCallStatusCodes.OK,
+            });
+
+            await expectEvent.inTransaction(receipt.transactionHash, SampleRecipient, 'SampleRecipientEmitted');
+
+            const ev2 = await expectEvent.inTransaction(receipt.transactionHash, SampleRecipient, 'SampleRecipientPostCall', {
+              preRetVal: '0x000000000000000000000000000000000000000000000000000000000001e240',
+            });
+          });
+
+          it('not works', async function () {
+            // emit SampleRecipientEmitted(message, getSender(), msg.sender, tx.origin);
+          });
+
           describe('recipient balance withdrawal ban', async function () {
+            beforeEach(async function () {
+              ({ txHash, signature } = await getRelayTxData());
+            });
+
             it('reverts relayed call if recipient withdraws balance during preRelayedCall', async function () {
               await recipient.setWithdrawDuringPreRelayedCall(true);
               await assertRevertWithRecipientBalanceChanged();

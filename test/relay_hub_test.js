@@ -680,7 +680,7 @@ contract("RelayHub", function (accounts) {
             let expenses = relay_balance_before.sub(relay_balance_after).toString()
 
             if (requested_fee == 0) {
-                let cur_overhead = await rhub.gasOverhead()
+                let cur_overhead = await rhub.relayCallConstantCost()
                 let gas_diff = (expenses - revenue) / gas_price
                 if (gas_diff != 0) {
                     console.log("== zero-fee unmatched gas. RelayHub.gasOverhead should be: " +
