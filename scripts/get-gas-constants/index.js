@@ -16,6 +16,8 @@ const { getTransactionHash } = require('../../src/js/relayclient/utils');
 const RelayHub = requireContract('RelayHub');
 const EmptyRecipient = requireContract('EmptyRecipient');
 
+const TOTAL_RELAYCALL_GAS = new BN('10000000000');
+
 async function main() {
   const vm = new VM();
 
@@ -25,9 +27,7 @@ async function main() {
   const owner = Wallet.generate();
   const relay = Wallet.generate();
 
-  // console.log((await call(vm, relayHub, 'version', [], { value: '0x00' })).decodedReturn);
-
-  await call(vm, relayHub, 'stake', [relay.getAddressString(), '100000'], {
+  await call(vm, relayHub, 'stake', [toAddress(relay), '100000'], {
     from: owner,
     value: toWei('0.5', 'ether'),
   });
@@ -38,58 +38,137 @@ async function main() {
     from: relay,
   });
 
-  await call(vm, relayHub, 'depositFor', [toHex(recipient.address)], { value: toWei('1', 'ether') });
+  await call(vm, relayHub, 'depositFor', [toAddress(recipient)], {
+    value: toWei('1', 'ether')
+  });
 
   const sender = Wallet.generate();
 
-  // address from,
-  // address recipient,
-  // bytes memory encodedFunction,
-  // uint256 transactionFee,
-  // uint256 gasPrice,
-  // uint256 gasLimit,
-  // uint256 nonce,
-  // bytes memory approval
+  await runDemoRelayCall(vm, relayHub, relay, sender, recipient);
+
+  const stepper = new Stepper(vm);
+  await runDemoRelayCall(vm, relayHub, relay, sender, recipient);
+
+  console.log(`${stepper.blocks.length} checkpoints:`);
+  for (const block of stepper.blocks) {
+    console.log(`- ${block.type}\t${block.usedGas}`);
+  }
+}
+
+const nextRelayHubNonce = new WeakMap();
+
+async function runDemoRelayCall(vm, relayHub, relay, sender, recipient) {
+  const nonce = nextRelayHubNonce.get(sender) || 0;
+  nextRelayHubNonce.set(sender, nonce + 1);
 
   const args = [
-    sender.getAddressString(),
-    toHex(recipient.address),
-    recipient.methods.nop(0).encodeABI(),
-    '0',
-    '0',
-    '8000000',
-    '0',
+    toAddress(sender),                        // address from,
+    toAddress(recipient),                     // address recipient,
+    recipient.methods.nop(0).encodeABI(),     // bytes memory encodedFunction,
+    '0',                                      // uint256 transactionFee,
+    '1',                                      // uint256 gasPrice,
+    '8000000',                                // uint256 gasLimit,
+    nonce.toString(),                         // uint256 nonce,
   ];
 
-  const hash = await getTransactionHash(...args, toHex(relayHub.address), relay.getAddressString());
+  const hash = await getTransactionHash(...args, toAddress(relayHub), toAddress(relay));
   const sig = web3EthSign(sender, fromHex(hash));
-
-  vm.on('step', function (data) {
-    if (data.opcode.name === 'GAS') {
-      console.log(`gasleft #${n}`, data.gasLeft.toString());
-    }
-  });
 
   await call(vm, relayHub, 'relayCall', [...args, sig], {
     from: relay,
+    gasLimit: TOTAL_RELAYCALL_GAS,
+    gasPrice: new BN('1'),
   });
 }
 
-async function deploy(vm, contract) {
-  const deployer = Wallet.generate();
+class Stepper {
+  constructor(vm) {
+    this.running = false;
 
-  const tx = new Transaction({
-    nonce: '0x00',
-    gasPrice: '0x00',
-    gasLimit: '0x800000000000', // we want effectively infinit gas
+    const step = this.step.bind(this);
+    const beforeTx = this.beforeTx.bind(this);
+    const afterTx = this.afterTx.bind(this);
+
+    vm.on('beforeTx', beforeTx);
+    vm.on('step', step);
+    vm.on('afterTx', afterTx);
+  }
+
+  beforeTx(tx) {
+    if (this.running) {
+      // shouldn't happen. sanity check
+      throw new Error('Concurrent vm usage');
+    }
+
+    this.running = true;
+    this.blocks = [{ type: 'begin', beginGas: new BN(tx.gasLimit) }];
+    this.prevOpcode = undefined;
+    this.seen = {};
+  }
+
+  step(data) {
+    const { gasLeft } = data;
+    const { name: opcode, fee: currentFee } = data.opcode;
+
+    if (this.seen[opcode] === undefined) {
+      this.seen[opcode] = 0;
+    }
+
+    // if (data.opcode.dynamic) {
+    //   console.log(data.opcode.name);
+    // }
+
+    if (
+      this.prevOpcode &&
+      isCheckpoint(this.prevOpcode, this.seen[this.prevOpcode] - 1)
+    ) {
+      const type = this.prevOpcode === 'GAS' ? 'gas' : 'yield';
+      this.blocks.push({ type, beginGas: gasLeft });
+    }
+
+    // console.log(opcode, this.seen[opcode]);
+
+    if (isCheckpoint(opcode, this.seen[opcode])) {
+      const block = this.blocks[this.blocks.length - 1];
+      block.yieldGas = gasLeft.sub(new BN(currentFee));
+      block.usedGas = block.beginGas.sub(block.yieldGas);
+    }
+
+    this.seen[opcode] += 1;
+    this.prevOpcode = opcode;
+  }
+
+  afterTx() {
+    this.running = false;
+  }
+}
+
+function isCheckpoint(opcode, timesSeen) {
+  // ignore the first staticcall, it's a call to the ecrecover precompile
+  if (opcode === 'STATICCALL' && timesSeen === 0) {
+    return false;
+  }
+
+  const isYield = ['CALL', 'STATICCALL', 'RETURN', 'STOP'].includes(opcode);
+
+  if (isYield) {
+    return true;
+  }
+
+  if (opcode === 'GAS') {
+    if ([0, 2, 4, 5, 6].includes(timesSeen)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function deploy(vm, contract) {
+  const { createdAddress } = await runTx(vm, {
     to: null,
-    value: '0x00',
     data: contract.options.data,
   });
-
-  tx.sign(deployer.getPrivateKey());
-
-  const { createdAddress } = await pify(vm).runTx({ tx, skipBalance: true });
 
   const instance = contract.clone();
   instance.address = createdAddress;
@@ -100,15 +179,17 @@ async function deploy(vm, contract) {
 async function call(vm, contract, fn, args = [], opts = {}) {
   const data = contract.methods[fn](...args).encodeABI();
 
-  const res = await runTx(vm, Object.assign({}, opts, { data, to: contract.address }));
+  const res = await runTx(vm, Object.assign({}, opts, {
+    data, to: contract.address
+  }));
 
   if (res.vm.exceptionError) {
     let reason;
     // we decode only if it's a normal revert reason
-    if (res.vm.return.slice(0, 4).equals(Buffer.from('08c379a0', 'hex'))) {
+    if (res.vm.return.slice(0, 4).equals(fromHex('0x08c379a0'))) {
       reason = res.vm.return.slice(4 + 32 + 32);
     } else {
-      reason = res.vm.return.toString('hex');
+      reason = toHex(res.vm.return);
     }
 
     throw new Error(`Transaction reverted (${reason})`);
@@ -123,11 +204,14 @@ async function call(vm, contract, fn, args = [], opts = {}) {
 const nextNonce = new WeakMap();
 
 async function runTx(vm, opts) {
+  // set defaults
   const {
     to,
     data = '0x',
     value = '0',
     from = Wallet.generate(),
+    gasLimit = new BN('100000000000'), // effectively infinit gas
+    gasPrice = new BN('0'),
   } = opts;
 
   const nonce = nextNonce.get(from) || 0;
@@ -137,9 +221,9 @@ async function runTx(vm, opts) {
   await addBalance(vm, from, value);
 
   const tx = new Transaction({
-    nonce: '0x' + nonce.toString(16),
-    gasPrice: '0x00',
-    gasLimit: '0x800000000000', // we want effectively infinit gas
+    nonce: toHex(nonce),
+    gasPrice,
+    gasLimit,
     to,
     value: new BN(value).toBuffer(),
     data,
@@ -158,8 +242,28 @@ async function addBalance(vm, wallet, balance) {
   await pify(vm.stateManager).putAccount(wallet.getAddress(), account);
 }
 
-function toHex(buf) {
-  return '0x' + buf.toString('hex');
+function toAddress(x) {
+  if (x instanceof Buffer || typeof x === 'number') {
+    return toHex(x);
+  }
+
+  if (x instanceof Wallet) {
+    return x.getAddressString();
+  }
+
+  if (x instanceof Web3Contract) {
+    return toHex(x.address);
+  }
+
+  throw new Error('Cannot convert to address');
+}
+
+function toHex(x) {
+  if (x instanceof Buffer) {
+    return '0x' + x.toString('hex');
+  } else if (typeof x === 'number') {
+    return '0x' + x.toString(16);
+  }
 }
 
 function fromHex(str) {
