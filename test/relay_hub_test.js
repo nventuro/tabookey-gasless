@@ -204,18 +204,18 @@ contract("RelayHub", function (accounts) {
         assert.equal(0, canRelay.valueOf());
     });
 
-    it("should get '1' (Wrong Signature) from 'canRelay' for a transaction with a wrong signature", async function () {
+    it("should get '5' (Wrong Signature) from 'canRelay' for a transaction with a wrong signature", async function () {
         let wrongSig = "0xaaaa6ad4b4fab03bb2feaea2d54c690206e40036e4baa930760e72479da0cc5575779f9db9ef801e144b5e6af48542107f2f094649334b030e2bb44f054429b451"
         let canRelay = await rhub.canRelay.call(relayAccount, from, to, transaction, transaction_fee, gas_price, gas_limit, relay_nonce, wrongSig);
-        assert.equal(1, canRelay.valueOf());
+        assert.equal(5, canRelay.valueOf());
     });
 
-    it("should get '2' (Wrong Nonce) from 'canRelay' for a transaction with a wrong nonce", async function () {
+    it("should get '6' (Wrong Nonce) from 'canRelay' for a transaction with a wrong nonce", async function () {
         let wrongNonce = 777;
         let digest = await getTransactionHash(from, to, transaction, transaction_fee, gas_price, gas_limit, wrongNonce, rhub.address, relayAccount);
         let sig = await getTransactionSignature(web3, accounts[0], digest)
         let canRelay = await rhub.canRelay.call(relayAccount, from, to, transaction, transaction_fee, gas_price, gas_limit, wrongNonce, sig);
-        assert.equal(2, canRelay.valueOf());
+        assert.equal(6, canRelay.valueOf());
     });
 
     // TODO: gasPrice change flow. As discussed, in case the Relay decides to ACCELERATE mining of tx he ALREADY signed,
@@ -260,32 +260,30 @@ contract("RelayHub", function (accounts) {
         assert.notEqual(0, postevent[0].returnValues.usedGas)
 
     });
-    it("should not accept relay requests from unknown addresses", async function () {
+    it("should get '1' (UnregisteredRelay) from 'relayCall' for a transaction from an unregistered relay", async function () {
         digest = await getTransactionHash(from, to, transaction, transaction_fee, gas_price, gas_limit, relay_nonce, rhub.address, relayAccount);
         sig = await getTransactionSignature(web3, accounts[0], digest)
-        try {
-            await rhub.relayCall(from, to, transaction, transaction_fee, gas_price, gas_limit, relay_nonce, sig, {
-                from: accounts[6],
-                gasPrice: gas_price,
-                gasLimit: gas_limit_any_value
-            });
-            assert.fail();
-        } catch (error) {
-            assertErrorMessageCorrect(error, "Unknown relay")
-        }
+        let res = await rhub.relayCall(from, to, transaction, transaction_fee, gas_price, gas_limit, relay_nonce, sig, {
+            from: accounts[6],
+            gasPrice: gas_price,
+            gasLimit: gas_limit_any_value
+        });
+
+        assert.equal(res.logs[0].event, "RelayCallFailed")
+        let UnregisteredRelay = 1;
+        assert.equal(res.logs[0].args.reason, UnregisteredRelay)
     });
 
-    it("should not accept relay requests with gas price lower then user specified", async function () {
-        try {
-            await rhub.relayCall(from, to, transaction, transaction_fee, gas_price, gas_limit, relay_nonce, sig, {
-                from: relayAccount,
-                gasPrice: gas_price - 1,
-                gasLimit: gas_limit_any_value
-            });
-            assert.fail();
-        } catch (error) {
-            assertErrorMessageCorrect(error, "Invalid gas price")
-        }
+    it("should get '2' (GasPriceTooLow) from 'relayCall' for a transaction with gas price lower than requested", async function () {
+        let res = await rhub.relayCall(from, to, transaction, transaction_fee, gas_price, gas_limit, relay_nonce, sig, {
+            from: relayAccount,
+            gasPrice: gas_price - 1,
+            gasLimit: gas_limit_any_value
+        });
+
+        assert.equal(res.logs[0].event, "RelayCallFailed")
+        let GasPriceTooLow = 2;
+        assert.equal(res.logs[0].args.reason, GasPriceTooLow)
     });
 
     it("should not accept relay requests if destination recipient doesn't approve it", async function () {
@@ -306,33 +304,31 @@ contract("RelayHub", function (accounts) {
         assert.equal(customErrorCode, canRelay.valueOf().toString())
     });
 
-    it("should not accept relay requests if gas limit is too low for a relayed transaction", async function () {
+    it("should get '3' (NotEnoughGas) from 'relayCall' for a transaction with gas limit too low for a relayed transaction", async function () {
         // Adding gasReserve is not enough by a few wei as some gas is spent before gasleft().
         let gas_reserve = 99999;
-        try {
-            await rhub.relayCall(from, to, transaction, transaction_fee, gas_price, gas_limit, relay_nonce, sig, {
-                from: relayAccount,
-                gasPrice: gas_price,
-                gas: gas_limit + gas_reserve
-            });
-            assert.fail();
-        } catch (error) {
-            assertErrorMessageCorrect(error, "Not enough gasleft");
-        }
+        let res = await rhub.relayCall(from, to, transaction, transaction_fee, gas_price, gas_limit, relay_nonce, sig, {
+            from: relayAccount,
+            gasPrice: gas_price,
+            gas: gas_limit + gas_reserve
+        });
+
+        assert.equal(res.logs[0].event, "RelayCallFailed")
+        let NotEnoughGas = 3;
+        assert.equal(res.logs[0].args.reason, NotEnoughGas)
     });
 
-    it("should not accept relay requests if destination recipient doesn't have a balance to pay for it", async function () {
+    it("should get '4' (RecipientBalanceTooLow) from 'relayCall' for a transaction if destination recipient doesn't have a balance to pay for it", async function () {
         await sr.withdraw();
-        try {
-            await rhub.relayCall(from, to, transaction, transaction_fee, gas_price, gas_limit, relay_nonce, sig, {
-                from: relayAccount,
-                gasPrice: gas_price,
-                gasLimit: gas_limit_any_value
-            });
-            assert.fail();
-        } catch (error) {
-            assertErrorMessageCorrect(error, "Recipient balance too low")
-        }
+        let res = await rhub.relayCall(from, to, transaction, transaction_fee, gas_price, gas_limit, relay_nonce, sig, {
+            from: relayAccount,
+            gasPrice: gas_price,
+            gasLimit: gas_limit_any_value
+        });
+
+        assert.equal(res.logs[0].event, "RelayCallFailed")
+        let RecipientBalanceTooLow = 4;
+        assert.equal(res.logs[0].args.reason, RecipientBalanceTooLow)
     });
 
 
@@ -743,7 +739,7 @@ contract("RelayHub", function (accounts) {
 
     it("should revert an attempt to use more than allowed gas for acceptRelayedCall(50000)", async function () {
 
-        let AcceptRelayedCallReverted = 3;
+        let AcceptRelayedCallReverted = 7;
         let overspendAcceptGas = await sr.overspendAcceptGas();
         try {
 

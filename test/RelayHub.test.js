@@ -19,10 +19,14 @@ contract('RelayHub', function ([_, relayOwner, relay, sender, other]) {
 
   const PreconditionCheck = {
     OK: new BN('0'),
-    WrongSignature: new BN('1'),
-    WrongNonce: new BN('2'),
-    AcceptRelayedCallReverted: new BN('3'),
-    InvalidRecipientStatusCode: new BN('4'),
+    UnregisteredRelay: new BN('1'),
+    GasPriceTooLow: new BN('2'),
+    NotEnoughGas: new BN('3'),
+    RecipientBalanceTooLow: new BN('4'),
+    WrongSignature: new BN('5'),
+    WrongNonce: new BN('6'),
+    AcceptRelayedCallReverted: new BN('7'),
+    InvalidRecipientStatusCode: new BN('8'),
   };
 
   let relayHub;
