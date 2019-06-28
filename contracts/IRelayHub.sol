@@ -84,6 +84,10 @@ contract IRelayHub {
     // Preconditions for relaying, checked by canRelay and returned as the corresponding numeric values.
     enum PreconditionCheck {
         OK,                         // All checks passed, the call can be relayed
+        UnregisteredRelay,          // The sender of the transaction is not a registered relay
+        GasPriceTooLow,             // The transaction's gas price is lower than the one the user requested
+        NotEnoughGas,               // The transaction's gas limit is not enough to cover for recipient calls and RelayHub operations
+        RecipientBalanceTooLow,     // The recipient's balance is not enough to cover for the maximum possible charge
         WrongSignature,             // The transaction to relay is not signed by requested sender
         WrongNonce,                 // The provided nonce has already been used by the sender
         AcceptRelayedCallReverted,  // The recipient rejected this call via acceptRelayedCall

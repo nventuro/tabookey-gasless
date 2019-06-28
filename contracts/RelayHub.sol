@@ -259,28 +259,19 @@ contract RelayHub is IRelayHub {
 
         // Initial soundness checks - the relay must make sure these pass, or it will pay for a reverted transaction.
 
-        // The relay must be registered
-        require(relays[msg.sender].state == RelayState.Registered, "Unknown relay");
-
-        // A relay may use a higher gas price than the one requested by the signer (to e.g. get the transaction in a
-        // block faster), but it must not be lower. The recipient will be charged for the requested gas price, not the
-        // one used in the transaction.
-        require(gasPrice <= tx.gasprice, "Invalid gas price");
-
-        // This transaction must have enough gas to forward the call to the recipient with the requested amount, and not
-        // run out of gas later in this function.
-        require(SafeMath.sub(initialGas, gasLimit) >= gasReserve, "Not enough gasleft()");
-
-        // We don't yet know how much gas will be used by the recipient, so we make sure there are enough funds to pay
-        // for the maximum possible charge.
-        require(gasPrice * initialGas <= balances[recipient], "Recipient balance too low");
+        // We first perform basic checks on the transaction's paramters: the sender must be a valid relay, the gas price
+        // and gas limit must be high enough, and the recipient have enough balance to be able to cover for those.
+        PreconditionCheck transactionCheckResult = transactionCheck(msg.sender, recipient, gasPrice, gasLimit, initialGas);
+        if (transactionCheckResult != PreconditionCheck.OK) {
+            emit RelayCallFailed(msg.sender, from, recipient, LibBytes.readBytes4(encodedFunction, 0), uint256(transactionCheckResult));
+            return;
+        }
 
         // We now verify the legitimacy of the transaction (it must be signed by the sender, and not be replayed), and
         // that the recpient will accept to be charged by it.
-        uint256 preconditionCheck = canRelay(msg.sender, from, IRelayRecipient(recipient), encodedFunction, transactionFee, gasPrice, gasLimit, nonce, approval);
-
-        if (preconditionCheck != uint256(PreconditionCheck.OK)) {
-            emit RelayCallFailed(msg.sender, from, recipient, LibBytes.readBytes4(encodedFunction, 0), preconditionCheck);
+        uint256 canRelayResult = canRelay(msg.sender, from, IRelayRecipient(recipient), encodedFunction, transactionFee, gasPrice, gasLimit, nonce, approval);
+        if (canRelayResult != uint256(PreconditionCheck.OK)) {
+            emit RelayCallFailed(msg.sender, from, recipient, LibBytes.readBytes4(encodedFunction, 0), canRelayResult);
             return;
         }
 
@@ -306,6 +297,39 @@ contract RelayHub is IRelayHub {
         balances[relays[msg.sender].owner] += charge;
 
         emit TransactionRelayed(msg.sender, from, recipient, abi.decode(encodedFunction, (bytes4)), status, charge);
+    }
+
+    function transactionCheck(address relay, address recipient, uint256 gasPrice, uint256 gasLimit, uint256 initialGas)
+        private
+        view
+        returns (PreconditionCheck)
+    {
+        // The relay must be registered
+        if (relays[relay].state != RelayState.Registered) {
+            return PreconditionCheck.UnregisteredRelay;
+        }
+
+
+        // A relay may use a higher gas price than the one requested by the signer (to e.g. get the transaction in a
+        // block faster), but it must not be lower. The recipient will be charged for the requested gas price, not the
+        // one used in the transaction.
+        if (tx.gasprice < gasPrice) {
+            return PreconditionCheck.GasPriceTooLow;
+        }
+
+        // This transaction must have enough gas to forward the call to the recipient with the requested amount, and not
+        // run out of gas later in this function.
+        if (SafeMath.sub(initialGas, gasLimit) < gasReserve) {
+            return PreconditionCheck.NotEnoughGas;
+        }
+
+        // We don't yet know how much gas will be used by the recipient, so we make sure there are enough funds to pay
+        // for the maximum possible charge.
+        if (gasPrice * initialGas > balances[recipient]) {
+            return PreconditionCheck.RecipientBalanceTooLow;
+        }
+
+        return PreconditionCheck.OK;
     }
 
     function getChargedAmount(uint256 gas, uint256 gasPrice, uint256 fee) private pure returns (uint256) {
