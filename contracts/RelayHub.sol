@@ -247,9 +247,10 @@ contract RelayHub is IRelayHub {
         // run out of gas later in this function.
         require(SafeMath.sub(initialGas, gasLimit) >= gasReserve, "Not enough gasleft()");
 
-        // We don't yet know how much gas will be used by the recipient, so we make sure there are enough funds to pay
-        // for the maximum possible charge.
-        require(gasPrice * initialGas <= balances[recipient], "Recipient balance too low");
+        //calculate maximum gas price, to make sure recipient can pay for it.
+        uint256 prepayGasLimit = getChargedAmount(initialGas, gasPrice, transactionFee);
+        require(prepayGasLimit <= balances[recipient], "Recipient balance too low");
+        balances[recipient] -= prepayGasLimit;
 
         // We now verify the legitimacy of the transaction (it must be signed by the sender, and not be replayed), and
         // that the recpient will accept to be charged by it.
@@ -275,12 +276,14 @@ contract RelayHub is IRelayHub {
         RelayCallStatus status = abi.decode(relayCallStatus, (RelayCallStatus));
 
         // Regardless of the outcome of the relayed transaction, the recipient is now charged.
+        // The charge is for actual gas used (so far) plus estimate for the gas by the rest of this method
+        // (which is constant: assuming the recipient and relay owner already have balance)
         uint256 charge = getChargedAmount(gasOverhead + initialGas - gasleft(), gasPrice, transactionFee);
 
-        // We've already checked that the recipient has enough balance to pay for the relayed transaction, this is only
-        // a sanity check to prevent overflows in case of bugs.
-        require(balances[recipient] >= charge, "Should not get here");
-        balances[recipient] -= charge;
+        // We've already deducted entire prepay amount from the recipient.
+        // now we "refund" it with the prepay amount, and charge actual used amount.
+        require(prepayGasLimit >= charge, "Should not get here");
+        balances[recipient] +=  prepayGasLimit - charge;
         balances[relays[msg.sender].owner] += charge;
 
         emit TransactionRelayed(msg.sender, from, recipient, functionSelector, uint256(status), charge);
